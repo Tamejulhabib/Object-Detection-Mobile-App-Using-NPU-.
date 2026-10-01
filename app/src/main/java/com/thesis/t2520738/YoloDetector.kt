@@ -5,13 +5,16 @@ import android.graphics.Bitmap
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.providers.NNAPIFlags
 import java.nio.FloatBuffer
+import java.util.EnumSet
 import kotlin.math.max
 import kotlin.math.min
 
 class YoloDetector(private val ctx: Context) {
 
     companion object {
+
         val NAMES = arrayOf(
             "bicycle",
             "bus",
@@ -41,7 +44,8 @@ class YoloDetector(private val ctx: Context) {
         private const val NMS_THRESHOLD = 0.45f
     }
 
-    private val env = OrtEnvironment.getEnvironment()
+    private val env =
+        OrtEnvironment.getEnvironment()
 
     private val modelBytes: ByteArray =
         ctx.assets.open("best.onnx").use {
@@ -60,50 +64,53 @@ class YoloDetector(private val ctx: Context) {
     @Synchronized
     fun setMode(useNpu: Boolean): String {
 
-        /*
-         * IMPORTANT:
-         *
-         * We create the NEW session first.
-         * We do NOT close the current working session until
-         * the new session has successfully initialized.
-         *
-         * Therefore, if NNAPI initialization fails,
-         * CPU mode continues working.
-         */
-
-        val options = OrtSession.SessionOptions()
+        val options =
+            OrtSession.SessionOptions()
 
         try {
 
             if (useNpu) {
 
                 /*
-                 * Enable Android NNAPI.
+                 * NNAPI ACCELERATED MODE
                  *
-                 * CPU_DISABLED is intentionally NOT used.
+                 * USE_FP16:
+                 * Allows NNAPI to use FP16 computation where
+                 * supported by the Android hardware/driver.
                  *
-                 * NNAPI may execute supported operations using
-                 * available Android neural acceleration hardware.
+                 * CPU_DISABLED is NOT used.
                  *
-                 * Unsupported operations are allowed to fall
-                 * back instead of crashing/failing the session.
+                 * Therefore unsupported operations are still
+                 * allowed to fall back instead of causing the
+                 * NNAPI session to fail.
                  */
-                options.addNnapi()
+
+                options.addNnapi(
+                    EnumSet.of(
+                        NNAPIFlags.USE_FP16
+                    )
+                )
             }
 
+            /*
+             * Create the new session BEFORE closing
+             * the currently working session.
+             */
             val newSession =
                 env.createSession(
                     modelBytes,
                     options
                 )
 
-            val oldSession = session
+            val oldSession =
+                session
 
-            session = newSession
+            session =
+                newSession
 
             mode =
                 if (useNpu) {
-                    "NNAPI"
+                    "NNAPI FP16"
                 } else {
                     "CPU"
                 }
@@ -111,7 +118,7 @@ class YoloDetector(private val ctx: Context) {
             oldSession?.close()
 
             return if (useNpu) {
-                "NNAPI ACTIVE"
+                "NNAPI FP16 ACTIVE"
             } else {
                 "OFF"
             }
@@ -119,8 +126,8 @@ class YoloDetector(private val ctx: Context) {
         } catch (e: Exception) {
 
             /*
-             * If NNAPI cannot initialize, keep the existing
-             * working session instead of crashing the app.
+             * If NNAPI initialization fails,
+             * preserve/create a CPU session.
              */
 
             if (session == null) {
@@ -139,16 +146,18 @@ class YoloDetector(private val ctx: Context) {
                     mode = "CPU"
 
                 } finally {
+
                     cpuOptions.close()
                 }
             }
 
             throw RuntimeException(
-                "NNAPI initialization failed: ${e.message}",
+                "NNAPI FP16 initialization failed: ${e.message}",
                 e
             )
 
         } finally {
+
             options.close()
         }
     }
@@ -167,6 +176,9 @@ class YoloDetector(private val ctx: Context) {
                 "ONNX Runtime session unavailable"
             )
 
+        /*
+         * Resize image to YOLO input size.
+         */
         val resized =
             Bitmap.createScaledBitmap(
                 src,
@@ -175,6 +187,9 @@ class YoloDetector(private val ctx: Context) {
                 true
             )
 
+        /*
+         * Extract pixels.
+         */
         val pixels =
             IntArray(
                 INPUT_SIZE * INPUT_SIZE
@@ -190,6 +205,14 @@ class YoloDetector(private val ctx: Context) {
             INPUT_SIZE
         )
 
+        /*
+         * YOLO input:
+         *
+         * [1, 3, 640, 640]
+         *
+         * RGB
+         * normalized 0-1
+         */
         val plane =
             INPUT_SIZE * INPUT_SIZE
 
@@ -200,18 +223,25 @@ class YoloDetector(private val ctx: Context) {
 
         for (i in pixels.indices) {
 
-            val pixel = pixels[i]
+            val pixel =
+                pixels[i]
 
             inputData[i] =
-                ((pixel shr 16) and 255) / 255.0f
+                ((pixel shr 16) and 255) /
+                    255.0f
 
             inputData[plane + i] =
-                ((pixel shr 8) and 255) / 255.0f
+                ((pixel shr 8) and 255) /
+                    255.0f
 
             inputData[(2 * plane) + i] =
-                (pixel and 255) / 255.0f
+                (pixel and 255) /
+                    255.0f
         }
 
+        /*
+         * Create ONNX input tensor.
+         */
         val tensor =
             OnnxTensor.createTensor(
                 env,
@@ -229,6 +259,15 @@ class YoloDetector(private val ctx: Context) {
             val inputName =
                 currentSession.inputNames.first()
 
+            /*
+             * IMPORTANT:
+             *
+             * Timing starts immediately before
+             * ONNX Runtime inference.
+             *
+             * Image preprocessing is NOT included
+             * in this inference measurement.
+             */
             val startTime =
                 System.nanoTime()
 
@@ -239,12 +278,23 @@ class YoloDetector(private val ctx: Context) {
                     )
                 )
 
+            val inferenceMs =
+                (
+                    System.nanoTime() -
+                        startTime
+                    ) / 1_000_000.0
+
             try {
 
-                val inferenceMs =
-                    (System.nanoTime() - startTime) /
-                        1_000_000.0
-
+                /*
+                 * Model output:
+                 *
+                 * [1, 23, 8400]
+                 *
+                 * 4 box values
+                 * +
+                 * 19 class scores
+                 */
                 @Suppress("UNCHECKED_CAST")
                 val output =
                     results[0].value
@@ -256,14 +306,23 @@ class YoloDetector(private val ctx: Context) {
                 val candidates =
                     ArrayList<Detection>()
 
+                /*
+                 * Decode all 8400 predictions.
+                 */
                 for (
                     predictionIndex
                     in 0 until NUM_PREDICTIONS
                 ) {
 
-                    var bestScore = 0.0f
-                    var bestClass = 0
+                    var bestScore =
+                        0.0f
 
+                    var bestClass =
+                        0
+
+                    /*
+                     * Find highest class score.
+                     */
                     for (
                         classIndex
                         in 0 until NUM_CLASSES
@@ -274,43 +333,72 @@ class YoloDetector(private val ctx: Context) {
                                 4 + classIndex
                             ][predictionIndex]
 
-                        if (score > bestScore) {
+                        if (
+                            score >
+                            bestScore
+                        ) {
 
-                            bestScore = score
-                            bestClass = classIndex
+                            bestScore =
+                                score
+
+                            bestClass =
+                                classIndex
                         }
                     }
 
+                    /*
+                     * Confidence filtering.
+                     */
                     if (
                         bestScore >=
                         CONFIDENCE_THRESHOLD
                     ) {
 
                         val cx =
-                            predictions[0][predictionIndex]
+                            predictions[
+                                0
+                            ][predictionIndex]
 
                         val cy =
-                            predictions[1][predictionIndex]
+                            predictions[
+                                1
+                            ][predictionIndex]
 
                         val width =
-                            predictions[2][predictionIndex]
+                            predictions[
+                                2
+                            ][predictionIndex]
 
                         val height =
-                            predictions[3][predictionIndex]
+                            predictions[
+                                3
+                            ][predictionIndex]
 
                         candidates.add(
                             Detection(
-                                cx - width / 2.0f,
-                                cy - height / 2.0f,
-                                cx + width / 2.0f,
-                                cy + height / 2.0f,
+                                cx -
+                                    width / 2.0f,
+
+                                cy -
+                                    height / 2.0f,
+
+                                cx +
+                                    width / 2.0f,
+
+                                cy +
+                                    height / 2.0f,
+
                                 bestScore,
+
                                 bestClass
                             )
                         )
                     }
                 }
 
+                /*
+                 * Non-Maximum Suppression.
+                 */
                 val detections =
                     nms(
                         candidates,
@@ -323,10 +411,12 @@ class YoloDetector(private val ctx: Context) {
                 )
 
             } finally {
+
                 results.close()
             }
 
         } finally {
+
             tensor.close()
         }
     }
@@ -339,6 +429,10 @@ class YoloDetector(private val ctx: Context) {
         val output =
             ArrayList<Detection>()
 
+        /*
+         * Run NMS separately
+         * for every object class.
+         */
         for (
             classId
             in 0 until NUM_CLASSES
@@ -347,7 +441,8 @@ class YoloDetector(private val ctx: Context) {
             val remaining =
                 detections
                     .filter {
-                        it.classId == classId
+                        it.classId ==
+                            classId
                     }
                     .sortedByDescending {
                         it.score
@@ -364,7 +459,11 @@ class YoloDetector(private val ctx: Context) {
                 output.add(best)
 
                 remaining.removeAll {
-                    iou(best, it) > threshold
+
+                    iou(
+                        best,
+                        it
+                    ) > threshold
                 }
             }
         }
@@ -378,28 +477,58 @@ class YoloDetector(private val ctx: Context) {
     ): Float {
 
         val x1 =
-            max(a.x1, b.x1)
+            max(
+                a.x1,
+                b.x1
+            )
 
         val y1 =
-            max(a.y1, b.y1)
+            max(
+                a.y1,
+                b.y1
+            )
 
         val x2 =
-            min(a.x2, b.x2)
+            min(
+                a.x2,
+                b.x2
+            )
 
         val y2 =
-            min(a.y2, b.y2)
+            min(
+                a.y2,
+                b.y2
+            )
 
         val intersection =
-            max(0.0f, x2 - x1) *
-                max(0.0f, y2 - y1)
+            max(
+                0.0f,
+                x2 - x1
+            ) *
+            max(
+                0.0f,
+                y2 - y1
+            )
 
         val areaA =
-            max(0.0f, a.x2 - a.x1) *
-                max(0.0f, a.y2 - a.y1)
+            max(
+                0.0f,
+                a.x2 - a.x1
+            ) *
+            max(
+                0.0f,
+                a.y2 - a.y1
+            )
 
         val areaB =
-            max(0.0f, b.x2 - b.x1) *
-                max(0.0f, b.y2 - b.y1)
+            max(
+                0.0f,
+                b.x2 - b.x1
+            ) *
+            max(
+                0.0f,
+                b.y2 - b.y1
+            )
 
         return intersection /
             (
