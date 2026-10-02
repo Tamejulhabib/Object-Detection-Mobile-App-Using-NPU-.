@@ -8,15 +8,16 @@ import android.graphics.Paint
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
-import ai.onnxruntime.providers.NNAPIFlags
 import java.nio.FloatBuffer
-import java.util.EnumSet
 import kotlin.math.max
 import kotlin.math.min
 
-class YoloDetector(private val context: Context) {
+class YoloDetector(
+    private val context: Context
+) {
 
     companion object {
+
         val NAMES = arrayOf(
             "bicycle",
             "bus",
@@ -43,46 +44,71 @@ class YoloDetector(private val context: Context) {
         private const val NUM_CLASSES = 19
         private const val NUM_PREDICTIONS = 8400
 
-        private const val CONFIDENCE_THRESHOLD = 0.35f
-        private const val NMS_THRESHOLD = 0.45f
+        private const val CONFIDENCE_THRESHOLD =
+            0.35f
+
+        private const val NMS_THRESHOLD =
+            0.45f
     }
 
-    private val env = OrtEnvironment.getEnvironment()
+    private val env =
+        OrtEnvironment.getEnvironment()
 
     private val modelBytes =
-        context.assets.open("best.onnx").use {
-            it.readBytes()
-        }
+        context.assets
+            .open("best.onnx")
+            .use {
+                it.readBytes()
+            }
 
-    private var session: OrtSession? = null
+    private var session:
+        OrtSession? = null
 
     var mode = "CPU"
         private set
 
     init {
+
         setMode(false)
     }
 
-    @Synchronized
-    fun setMode(useNpu: Boolean): String {
+    /*
+     * ==============================================================
+     * CPU / NNAPI SESSION
+     * ==============================================================
+     */
 
-        val options = OrtSession.SessionOptions()
+    @Synchronized
+    fun setMode(
+        useNpu: Boolean
+    ): String {
+
+        val options =
+            OrtSession.SessionOptions()
 
         try {
 
             if (useNpu) {
+
                 /*
-                 * NNAPI enabled.
-                 * FP16 is allowed where supported.
+                 * IMPORTANT:
                  *
-                 * CPU fallback remains enabled.
+                 * No CPU_DISABLED.
+                 *
+                 * No FP16 during accuracy debugging.
+                 *
+                 * NNAPI is only enabled after MainActivity
+                 * has validated the supported experimental
+                 * device.
                  */
-                options.addNnapi(
-                    EnumSet.of(
-                        NNAPIFlags.USE_FP16
-                    )
-                )
+
+                options.addNnapi()
             }
+
+            /*
+             * Create new session before destroying
+             * the currently working session.
+             */
 
             val newSession =
                 env.createSession(
@@ -90,9 +116,11 @@ class YoloDetector(private val context: Context) {
                     options
                 )
 
-            val oldSession = session
+            val oldSession =
+                session
 
-            session = newSession
+            session =
+                newSession
 
             mode =
                 if (useNpu) {
@@ -112,14 +140,17 @@ class YoloDetector(private val context: Context) {
         } catch (e: Exception) {
 
             /*
-             * Keep/create CPU session if NNAPI fails.
+             * If NNAPI initialization fails,
+             * preserve/create CPU execution.
              */
+
             if (session == null) {
 
                 val cpuOptions =
                     OrtSession.SessionOptions()
 
                 try {
+
                     session =
                         env.createSession(
                             modelBytes,
@@ -129,6 +160,7 @@ class YoloDetector(private val context: Context) {
                     mode = "CPU"
 
                 } finally {
+
                     cpuOptions.close()
                 }
             }
@@ -139,42 +171,55 @@ class YoloDetector(private val context: Context) {
             )
 
         } finally {
+
             options.close()
         }
     }
+
+    /*
+     * ==============================================================
+     * DETECTION
+     * ==============================================================
+     */
 
     @Synchronized
     fun detect(
         source: Bitmap
     ): List<Detection> {
 
-        if (session == null) {
+        if (
+            session == null
+        ) {
+
             setMode(false)
         }
 
         val currentSession =
-            session ?: return emptyList()
+            session
+                ?: return emptyList()
 
-        /*
-         * --------------------------------------------------
-         * LETTERBOX
-         * --------------------------------------------------
-         *
-         * DO NOT stretch the image to 640x640.
-         *
-         * Preserve the original aspect ratio and add
-         * padding around the image.
-         */
+        val originalWidth =
+            source.width
 
-        val originalWidth = source.width
-        val originalHeight = source.height
+        val originalHeight =
+            source.height
 
         if (
             originalWidth <= 0 ||
             originalHeight <= 0
         ) {
+
             return emptyList()
         }
+
+        /*
+         * ==========================================================
+         * LETTERBOX
+         * ==========================================================
+         *
+         * Do NOT stretch a rectangular image
+         * directly into 640x640.
+         */
 
         val scale =
             min(
@@ -214,32 +259,51 @@ class YoloDetector(private val context: Context) {
             Canvas(letterboxed)
 
         /*
-         * YOLO letterbox padding.
+         * Standard YOLO-style padding value.
          */
-        canvas.drawColor(Color.rgb(114, 114, 114))
+
+        canvas.drawColor(
+            Color.rgb(
+                114,
+                114,
+                114
+            )
+        )
 
         val padX =
-            (INPUT_SIZE - scaledWidth) / 2f
+            (
+                INPUT_SIZE -
+                    scaledWidth
+                ) / 2f
 
         val padY =
-            (INPUT_SIZE - scaledHeight) / 2f
+            (
+                INPUT_SIZE -
+                    scaledHeight
+                ) / 2f
+
+        val bitmapPaint =
+            Paint(
+                Paint.FILTER_BITMAP_FLAG
+            )
 
         canvas.drawBitmap(
             resized,
             padX,
             padY,
-            Paint(Paint.FILTER_BITMAP_FLAG)
+            bitmapPaint
         )
 
         /*
-         * --------------------------------------------------
-         * BITMAP -> YOLO FLOAT TENSOR
-         * --------------------------------------------------
+         * ==========================================================
+         * BITMAP -> RGB FLOAT32
+         * ==========================================================
          */
 
         val pixels =
             IntArray(
-                INPUT_SIZE * INPUT_SIZE
+                INPUT_SIZE *
+                    INPUT_SIZE
             )
 
         letterboxed.getPixels(
@@ -253,34 +317,61 @@ class YoloDetector(private val context: Context) {
         )
 
         val plane =
-            INPUT_SIZE * INPUT_SIZE
+            INPUT_SIZE *
+                INPUT_SIZE
 
         val inputData =
             FloatArray(
                 3 * plane
             )
 
-        for (i in pixels.indices) {
+        for (
+            i in pixels.indices
+        ) {
 
-            val pixel = pixels[i]
+            val pixel =
+                pixels[i]
+
+            /*
+             * R
+             */
 
             inputData[i] =
-                ((pixel shr 16) and 255) /
-                    255.0f
+                (
+                    (pixel shr 16)
+                        and 255
+                    ) / 255.0f
 
-            inputData[plane + i] =
-                ((pixel shr 8) and 255) /
-                    255.0f
+            /*
+             * G
+             */
 
-            inputData[(2 * plane) + i] =
-                (pixel and 255) /
-                    255.0f
+            inputData[
+                plane + i
+            ] =
+                (
+                    (pixel shr 8)
+                        and 255
+                    ) / 255.0f
+
+            /*
+             * B
+             */
+
+            inputData[
+                (2 * plane) + i
+            ] =
+                (
+                    pixel and 255
+                    ) / 255.0f
         }
 
         val tensor =
             OnnxTensor.createTensor(
                 env,
-                FloatBuffer.wrap(inputData),
+                FloatBuffer.wrap(
+                    inputData
+                ),
                 longArrayOf(
                     1,
                     3,
@@ -292,7 +383,9 @@ class YoloDetector(private val context: Context) {
         try {
 
             val inputName =
-                currentSession.inputNames.first()
+                currentSession
+                    .inputNames
+                    .first()
 
             val results =
                 currentSession.run(
@@ -303,10 +396,24 @@ class YoloDetector(private val context: Context) {
 
             try {
 
-                @Suppress("UNCHECKED_CAST")
+                /*
+                 * Model:
+                 *
+                 * output0
+                 * [1,23,8400]
+                 *
+                 * 4 coordinates
+                 * 19 class scores
+                 */
+
+                @Suppress(
+                    "UNCHECKED_CAST"
+                )
                 val output =
                     results[0].value
-                            as Array<Array<FloatArray>>
+                            as Array<
+                            Array<FloatArray>
+                            >
 
                 val predictions =
                     output[0]
@@ -315,31 +422,47 @@ class YoloDetector(private val context: Context) {
                     ArrayList<Detection>()
 
                 /*
-                 * --------------------------------------------------
-                 * YOLO [1,23,8400] DECODING
-                 * --------------------------------------------------
+                 * ==================================================
+                 * DECODE YOLO OUTPUT
+                 * ==================================================
                  */
 
                 for (
-                    i in 0 until NUM_PREDICTIONS
+                    predictionIndex
+                    in 0 until
+                        NUM_PREDICTIONS
                 ) {
 
-                    var bestScore = 0f
-                    var bestClass = 0
+                    var bestScore =
+                        0f
+
+                    var bestClass =
+                        0
 
                     for (
                         classIndex
-                        in 0 until NUM_CLASSES
+                        in 0 until
+                            NUM_CLASSES
                     ) {
 
                         val score =
                             predictions[
-                                4 + classIndex
-                            ][i]
+                                4 +
+                                    classIndex
+                            ][
+                                predictionIndex
+                            ]
 
-                        if (score > bestScore) {
-                            bestScore = score
-                            bestClass = classIndex
+                        if (
+                            score >
+                            bestScore
+                        ) {
+
+                            bestScore =
+                                score
+
+                            bestClass =
+                                classIndex
                         }
                     }
 
@@ -347,58 +470,85 @@ class YoloDetector(private val context: Context) {
                         bestScore <
                         CONFIDENCE_THRESHOLD
                     ) {
+
                         continue
                     }
 
                     val cx =
-                        predictions[0][i]
+                        predictions[0][
+                            predictionIndex
+                        ]
 
                     val cy =
-                        predictions[1][i]
+                        predictions[1][
+                            predictionIndex
+                        ]
 
                     val boxWidth =
-                        predictions[2][i]
+                        predictions[2][
+                            predictionIndex
+                        ]
 
                     val boxHeight =
-                        predictions[3][i]
+                        predictions[3][
+                            predictionIndex
+                        ]
 
                     /*
-                     * Coordinates currently refer to
-                     * the 640x640 letterboxed image.
+                     * Model coordinates are currently
+                     * relative to the 640x640 letterbox.
                      */
+
                     var x1 =
-                        cx - boxWidth / 2f
+                        cx -
+                            boxWidth / 2f
 
                     var y1 =
-                        cy - boxHeight / 2f
+                        cy -
+                            boxHeight / 2f
 
                     var x2 =
-                        cx + boxWidth / 2f
+                        cx +
+                            boxWidth / 2f
 
                     var y2 =
-                        cy + boxHeight / 2f
+                        cy +
+                            boxHeight / 2f
 
                     /*
-                     * --------------------------------------------------
+                     * ==================================================
                      * REMOVE LETTERBOX PADDING
-                     * --------------------------------------------------
+                     * ==================================================
                      */
 
                     x1 =
-                        (x1 - padX) / scale
+                        (
+                            x1 -
+                                padX
+                            ) / scale
 
                     y1 =
-                        (y1 - padY) / scale
+                        (
+                            y1 -
+                                padY
+                            ) / scale
 
                     x2 =
-                        (x2 - padX) / scale
+                        (
+                            x2 -
+                                padX
+                            ) / scale
 
                     y2 =
-                        (y2 - padY) / scale
+                        (
+                            y2 -
+                                padY
+                            ) / scale
 
                     /*
-                     * Clamp coordinates to original frame.
+                     * Clamp to actual source image.
                      */
+
                     x1 =
                         x1.coerceIn(
                             0f,
@@ -427,6 +577,7 @@ class YoloDetector(private val context: Context) {
                         x2 <= x1 ||
                         y2 <= y1
                     ) {
+
                         continue
                     }
 
@@ -442,25 +593,42 @@ class YoloDetector(private val context: Context) {
                     )
                 }
 
+                /*
+                 * ==================================================
+                 * NMS
+                 * ==================================================
+                 */
+
                 return nms(
                     candidates,
                     NMS_THRESHOLD
                 )
 
             } finally {
+
                 results.close()
             }
 
         } finally {
+
             tensor.close()
 
-            if (resized !== source) {
+            if (
+                resized !== source
+            ) {
+
                 resized.recycle()
             }
 
             letterboxed.recycle()
         }
     }
+
+    /*
+     * ==============================================================
+     * NON-MAXIMUM SUPPRESSION
+     * ==============================================================
+     */
 
     private fun nms(
         detections: List<Detection>,
@@ -472,15 +640,19 @@ class YoloDetector(private val context: Context) {
 
         for (
             classId
-            in 0 until NUM_CLASSES
+            in 0 until
+                NUM_CLASSES
         ) {
 
             val remaining =
                 detections
                     .filter {
-                        it.classId == classId
+
+                        it.classId ==
+                            classId
                     }
                     .sortedByDescending {
+
                         it.score
                     }
                     .toMutableList()
@@ -492,10 +664,16 @@ class YoloDetector(private val context: Context) {
                 val best =
                     remaining.removeAt(0)
 
-                output.add(best)
+                output.add(
+                    best
+                )
 
                 remaining.removeAll {
-                    iou(best, it) >
+
+                    iou(
+                        best,
+                        it
+                    ) >
                         threshold
                 }
             }
@@ -504,34 +682,70 @@ class YoloDetector(private val context: Context) {
         return output
     }
 
+    /*
+     * ==============================================================
+     * INTERSECTION OVER UNION
+     * ==============================================================
+     */
+
     private fun iou(
         a: Detection,
         b: Detection
     ): Float {
 
         val x1 =
-            max(a.x1, b.x1)
+            max(
+                a.x1,
+                b.x1
+            )
 
         val y1 =
-            max(a.y1, b.y1)
+            max(
+                a.y1,
+                b.y1
+            )
 
         val x2 =
-            min(a.x2, b.x2)
+            min(
+                a.x2,
+                b.x2
+            )
 
         val y2 =
-            min(a.y2, b.y2)
+            min(
+                a.y2,
+                b.y2
+            )
 
         val intersection =
-            max(0f, x2 - x1) *
-                max(0f, y2 - y1)
+            max(
+                0f,
+                x2 - x1
+            ) *
+                max(
+                    0f,
+                    y2 - y1
+                )
 
         val areaA =
-            max(0f, a.x2 - a.x1) *
-                max(0f, a.y2 - a.y1)
+            max(
+                0f,
+                a.x2 - a.x1
+            ) *
+                max(
+                    0f,
+                    a.y2 - a.y1
+                )
 
         val areaB =
-            max(0f, b.x2 - b.x1) *
-                max(0f, b.y2 - b.y1)
+            max(
+                0f,
+                b.x2 - b.x1
+            ) *
+                max(
+                    0f,
+                    b.y2 - b.y1
+                )
 
         return intersection /
             (
@@ -539,6 +753,6 @@ class YoloDetector(private val context: Context) {
                     areaB -
                     intersection +
                     0.000001f
-            )
+                )
     }
 }
