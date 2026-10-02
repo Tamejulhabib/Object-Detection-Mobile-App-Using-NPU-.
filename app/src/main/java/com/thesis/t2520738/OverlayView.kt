@@ -11,43 +11,77 @@ import kotlin.math.min
 class OverlayView(
     context: Context,
     attrs: AttributeSet?
-) : View(context, attrs) {
+) : View(
+    context,
+    attrs
+) {
 
     private var detections:
-        List<Detection> = emptyList()
+        List<Detection> =
+        emptyList()
 
-    private var imageWidth = 1
-    private var imageHeight = 1
+    private var imageWidth =
+        1
+
+    private var imageHeight =
+        1
 
     private val boxPaint =
         Paint().apply {
-            style = Paint.Style.STROKE
-            strokeWidth = 4f
-            color = Color.GREEN
-            isAntiAlias = true
+
+            style =
+                Paint.Style.STROKE
+
+            strokeWidth =
+                4f
+
+            color =
+                Color.GREEN
+
+            isAntiAlias =
+                true
         }
 
     private val textPaint =
         Paint().apply {
-            style = Paint.Style.FILL
-            textSize = 30f
-            color = Color.WHITE
-            isAntiAlias = true
+
+            style =
+                Paint.Style.FILL
+
+            textSize =
+                30f
+
+            color =
+                Color.WHITE
+
+            isAntiAlias =
+                true
         }
 
     private val textBackgroundPaint =
         Paint().apply {
-            style = Paint.Style.FILL
-            color = Color.argb(
-                180,
-                0,
-                0,
-                0
-            )
+
+            style =
+                Paint.Style.FILL
+
+            color =
+                Color.argb(
+                    180,
+                    0,
+                    0,
+                    0
+                )
         }
 
+    /*
+     * ==============================================================
+     * SET DETECTIONS
+     * ==============================================================
+     */
+
     fun setDetections(
-        newDetections: List<Detection>,
+        newDetections:
+            List<Detection>,
         sourceWidth: Int,
         sourceHeight: Int
     ) {
@@ -56,24 +90,43 @@ class OverlayView(
             newDetections
 
         imageWidth =
-            sourceWidth.coerceAtLeast(1)
+            sourceWidth
+                .coerceAtLeast(1)
 
         imageHeight =
-            sourceHeight.coerceAtLeast(1)
+            sourceHeight
+                .coerceAtLeast(1)
 
         postInvalidate()
     }
+
+    /*
+     * ==============================================================
+     * CLEAR
+     * ==============================================================
+     */
 
     fun clear() {
-        detections = emptyList()
+
+        detections =
+            emptyList()
+
         postInvalidate()
     }
+
+    /*
+     * ==============================================================
+     * DRAW
+     * ==============================================================
+     */
 
     override fun onDraw(
         canvas: Canvas
     ) {
 
-        super.onDraw(canvas)
+        super.onDraw(
+            canvas
+        )
 
         if (
             width <= 0 ||
@@ -81,14 +134,19 @@ class OverlayView(
             imageWidth <= 0 ||
             imageHeight <= 0
         ) {
+
             return
         }
 
         /*
-         * ImageView/Preview is treated as FIT_CENTER.
+         * FIT_CENTER mapping.
          *
-         * Preserve the source aspect ratio.
+         * This matches MainActivity:
+         *
+         * PreviewView.ScaleType.FIT_CENTER
+         * ImageView.ScaleType.FIT_CENTER
          */
+
         val scale =
             min(
                 width.toFloat() /
@@ -99,34 +157,57 @@ class OverlayView(
             )
 
         val displayedWidth =
-            imageWidth * scale
+            imageWidth *
+                scale
 
         val displayedHeight =
-            imageHeight * scale
+            imageHeight *
+                scale
 
         val offsetX =
-            (width - displayedWidth) / 2f
+            (
+                width -
+                    displayedWidth
+                ) / 2f
 
         val offsetY =
-            (height - displayedHeight) / 2f
+            (
+                height -
+                    displayedHeight
+                ) / 2f
 
-        for (d in detections) {
+        /*
+         * Draw every detection.
+         */
+
+        for (
+            detection
+            in detections
+        ) {
 
             val left =
-                d.x1 * scale +
+                detection.x1 *
+                    scale +
                     offsetX
 
             val top =
-                d.y1 * scale +
+                detection.y1 *
+                    scale +
                     offsetY
 
             val right =
-                d.x2 * scale +
+                detection.x2 *
+                    scale +
                     offsetX
 
             val bottom =
-                d.y2 * scale +
+                detection.y2 *
+                    scale +
                     offsetY
+
+            /*
+             * Bounding box.
+             */
 
             canvas.drawRect(
                 left,
@@ -136,23 +217,37 @@ class OverlayView(
                 boxPaint
             )
 
+            /*
+             * Class name.
+             */
+
             val className =
                 if (
-                    d.classId in
-                    YoloDetector.NAMES.indices
+                    detection.classId
+                    in
+                    YoloDetector
+                        .NAMES
+                        .indices
                 ) {
-                    YoloDetector.NAMES[
-                        d.classId
-                    ]
+
+                    YoloDetector
+                        .NAMES[
+                            detection.classId
+                        ]
+
                 } else {
+
                     "object"
                 }
 
+            val confidence =
+                (
+                    detection.score *
+                        100
+                    ).toInt()
+
             val label =
-                "$className ${
-                    (d.score * 100)
-                        .toInt()
-                }%"
+                "$className $confidence%"
 
             val textWidth =
                 textPaint.measureText(
@@ -164,19 +259,36 @@ class OverlayView(
                     10f
 
             var labelTop =
-                top - textHeight
+                top -
+                    textHeight
 
-            if (labelTop < 0f) {
-                labelTop = top
+            if (
+                labelTop <
+                0f
+            ) {
+
+                labelTop =
+                    top
             }
+
+            /*
+             * Label background.
+             */
 
             canvas.drawRect(
                 left,
                 labelTop,
-                left + textWidth + 12f,
-                labelTop + textHeight,
+                left +
+                    textWidth +
+                    12f,
+                labelTop +
+                    textHeight,
                 textBackgroundPaint
             )
+
+            /*
+             * Label.
+             */
 
             canvas.drawText(
                 label,
