@@ -4,9 +4,10 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.media.MediaMetadataRetriever
 import android.os.Bundle
-import android.os.Process
+import android.view.Surface
 import android.view.View
 import android.widget.Button
 import android.widget.ImageView
@@ -23,199 +24,415 @@ import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var detector: YoloDetector
-    private lateinit var overlay: OverlayView
-    private lateinit var monitor: TextView
-    private lateinit var preview: PreviewView
-    private lateinit var videoImage: ImageView
+    private lateinit var detector:
+        YoloDetector
 
-    private val executor = Executors.newSingleThreadExecutor()
+    private lateinit var overlay:
+        OverlayView
 
-    private var lastFrameTime = System.nanoTime()
-    private var previousCpuTime = Process.getElapsedCpuTime()
-    private var previousWallTime = System.currentTimeMillis()
+    private lateinit var monitor:
+        TextView
 
-    private var acceleratorStatus = "OFF"
+    private lateinit var preview:
+        PreviewView
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
+    private lateinit var videoImage:
+        ImageView
 
-        detector = YoloDetector(this)
-        detector.setMode(false)
+    private val executor =
+        Executors.newSingleThreadExecutor()
 
-        overlay = findViewById(R.id.overlay)
-        monitor = findViewById(R.id.monitor)
-        preview = findViewById(R.id.preview)
-        videoImage = findViewById(R.id.videoImage)
+    private var acceleratorStatus =
+        "OFF"
 
-        findViewById<Button>(R.id.cpuButton).setOnClickListener {
+    override fun onCreate(
+        savedInstanceState: Bundle?
+    ) {
+
+        super.onCreate(
+            savedInstanceState
+        )
+
+        setContentView(
+            R.layout.activity_main
+        )
+
+        detector =
+            YoloDetector(this)
+
+        overlay =
+            findViewById(
+                R.id.overlay
+            )
+
+        monitor =
+            findViewById(
+                R.id.monitor
+            )
+
+        preview =
+            findViewById(
+                R.id.preview
+            )
+
+        videoImage =
+            findViewById(
+                R.id.videoImage
+            )
+
+        /*
+         * Important for predictable overlay mapping.
+         */
+        preview.scaleType =
+            PreviewView.ScaleType.FIT_CENTER
+
+        videoImage.scaleType =
+            ImageView.ScaleType.FIT_CENTER
+
+        updateStatus()
+
+        findViewById<Button>(
+            R.id.cpuButton
+        ).setOnClickListener {
+
             executor.execute {
-                detector.setMode(false)
-                acceleratorStatus = "OFF"
-            }
-        }
 
-        findViewById<Button>(R.id.npuButton).setOnClickListener {
-            executor.execute {
                 try {
-                    acceleratorStatus = detector.setMode(true)
-                } catch (e: Exception) {
-                    acceleratorStatus = "NNAPI FAILED"
+
                     detector.setMode(false)
+
+                    acceleratorStatus =
+                        "OFF"
+
+                } catch (_: Exception) {
+                    acceleratorStatus =
+                        "OFF"
+                }
+
+                runOnUiThread {
+                    updateStatus()
                 }
             }
         }
 
-        findViewById<Button>(R.id.cameraButton).setOnClickListener {
+        findViewById<Button>(
+            R.id.npuButton
+        ).setOnClickListener {
+
+            executor.execute {
+
+                try {
+
+                    acceleratorStatus =
+                        detector.setMode(true)
+
+                } catch (_: Exception) {
+
+                    acceleratorStatus =
+                        "FAILED"
+                }
+
+                runOnUiThread {
+                    updateStatus()
+                }
+            }
+        }
+
+        findViewById<Button>(
+            R.id.cameraButton
+        ).setOnClickListener {
+
             startCamera()
         }
 
-        findViewById<Button>(R.id.videoButton).setOnClickListener {
+        findViewById<Button>(
+            R.id.videoButton
+        ).setOnClickListener {
+
             pickVideo()
         }
 
         if (
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.CAMERA
-            ) != PackageManager.PERMISSION_GRANTED
+            ContextCompat
+                .checkSelfPermission(
+                    this,
+                    Manifest.permission.CAMERA
+                ) ==
+            PackageManager.PERMISSION_GRANTED
         ) {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.CAMERA),
-                7
-            )
+
+            /*
+             * Wait until PreviewView has actually
+             * completed its first layout.
+             *
+             * This fixes the behaviour where rotating
+             * the phone made the camera suddenly work.
+             */
+            preview.post {
+                startCamera()
+            }
+
         } else {
-            startCamera()
+
+            ActivityCompat
+                .requestPermissions(
+                    this,
+                    arrayOf(
+                        Manifest.permission.CAMERA
+                    ),
+                    CAMERA_PERMISSION_CODE
+                )
         }
+    }
+
+    private fun updateStatus() {
+
+        monitor.text =
+            if (
+                detector.mode ==
+                "NNAPI"
+            ) {
+
+                """
+                MODE: NNAPI
+                NPU: $acceleratorStatus
+                """.trimIndent()
+
+            } else {
+
+                """
+                MODE: CPU
+                NPU: OFF
+                """.trimIndent()
+            }
     }
 
     private fun startCamera() {
 
-        videoImage.visibility = View.GONE
-        preview.visibility = View.VISIBLE
+        overlay.clear()
 
-        val cameraProviderFuture =
-            ProcessCameraProvider.getInstance(this)
+        videoImage.visibility =
+            View.GONE
 
-        cameraProviderFuture.addListener({
+        preview.visibility =
+            View.VISIBLE
 
-            val cameraProvider = cameraProviderFuture.get()
+        /*
+         * Do not bind until PreviewView
+         * has valid dimensions.
+         */
+        if (
+            preview.width == 0 ||
+            preview.height == 0
+        ) {
 
-            val cameraPreview =
-                Preview.Builder()
-                    .build()
-                    .also {
-                        it.setSurfaceProvider(preview.surfaceProvider)
-                    }
-
-            val imageAnalysis =
-                ImageAnalysis.Builder()
-                    .setBackpressureStrategy(
-                        ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST
-                    )
-                    .build()
-
-            imageAnalysis.setAnalyzer(executor) { image ->
-
-                try {
-                    val bitmap = image.toBitmap()
-                    runDetection(bitmap)
-                } finally {
-                    image.close()
-                }
+            preview.post {
+                startCamera()
             }
 
-            cameraProvider.unbindAll()
+            return
+        }
 
-            cameraProvider.bindToLifecycle(
-                this,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                cameraPreview,
-                imageAnalysis
-            )
+        val providerFuture =
+            ProcessCameraProvider
+                .getInstance(this)
+
+        providerFuture.addListener({
+
+            try {
+
+                val cameraProvider =
+                    providerFuture.get()
+
+                val rotation =
+                    preview.display?.rotation
+                        ?: Surface.ROTATION_0
+
+                val cameraPreview =
+                    Preview.Builder()
+                        .setTargetRotation(
+                            rotation
+                        )
+                        .build()
+
+                cameraPreview
+                    .setSurfaceProvider(
+                        preview.surfaceProvider
+                    )
+
+                val analysis =
+                    ImageAnalysis.Builder()
+                        .setTargetRotation(
+                            rotation
+                        )
+                        .setBackpressureStrategy(
+                            ImageAnalysis
+                                .STRATEGY_KEEP_ONLY_LATEST
+                        )
+                        .build()
+
+                analysis.setAnalyzer(
+                    executor
+                ) { image ->
+
+                    try {
+
+                        /*
+                         * CameraX provides the amount
+                         * the frame must be rotated to
+                         * match the display orientation.
+                         */
+                        val rotationDegrees =
+                            image.imageInfo
+                                .rotationDegrees
+
+                        val rawBitmap =
+                            image.toBitmap()
+
+                        val bitmap =
+                            rotateBitmap(
+                                rawBitmap,
+                                rotationDegrees
+                            )
+
+                        runDetection(
+                            bitmap
+                        )
+
+                        if (
+                            bitmap !==
+                            rawBitmap
+                        ) {
+                            rawBitmap.recycle()
+                        }
+
+                    } catch (_: Exception) {
+
+                        /*
+                         * Do not allow one bad frame
+                         * to kill camera analysis.
+                         */
+
+                    } finally {
+
+                        image.close()
+                    }
+                }
+
+                cameraProvider
+                    .unbindAll()
+
+                cameraProvider
+                    .bindToLifecycle(
+                        this,
+                        CameraSelector
+                            .DEFAULT_BACK_CAMERA,
+                        cameraPreview,
+                        analysis
+                    )
+
+            } catch (e: Exception) {
+
+                runOnUiThread {
+
+                    monitor.text =
+                        """
+                        MODE: ${detector.mode}
+                        CAMERA: FAILED
+                        """.trimIndent()
+                }
+            }
 
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun runDetection(bitmap: Bitmap) {
+    private fun rotateBitmap(
+        source: Bitmap,
+        degrees: Int
+    ): Bitmap {
 
-        val result = detector.detect(bitmap)
+        if (
+            degrees == 0
+        ) {
+            return source
+        }
 
-        val detections = result.first
-        val inferenceMs = result.second
-
-        val currentTime = System.nanoTime()
-
-        val elapsed =
-            (currentTime - lastFrameTime).coerceAtLeast(1L)
-
-        val fps =
-            1_000_000_000.0 / elapsed.toDouble()
-
-        lastFrameTime = currentTime
-
-        val currentCpuTime =
-            Process.getElapsedCpuTime()
-
-        val currentWallTime =
-            System.currentTimeMillis()
-
-        val wallDifference =
-            (currentWallTime - previousWallTime)
-                .coerceAtLeast(1L)
-
-        val cpuDifference =
-            currentCpuTime - previousCpuTime
-
-        val cpuUsage =
-            (
-                cpuDifference.toDouble() /
-                    wallDifference.toDouble() *
-                    100.0
-            ).coerceIn(0.0, 100.0)
-
-        previousCpuTime = currentCpuTime
-        previousWallTime = currentWallTime
-
-        runOnUiThread {
-
-            overlay.setDetections(
-                detections,
-                640,
-                640
-            )
-
-            monitor.text =
-                """
-                MODE: ${detector.mode}
-                NPU: $acceleratorStatus
-                CPU: %.1f%%
-                FPS: %.1f
-                INFERENCE: %.1f ms
-                OBJECTS: %d
-                """.trimIndent().format(
-                    cpuUsage,
-                    fps,
-                    inferenceMs,
-                    detections.size
+        val matrix =
+            Matrix().apply {
+                postRotate(
+                    degrees.toFloat()
                 )
+            }
+
+        return Bitmap.createBitmap(
+            source,
+            0,
+            0,
+            source.width,
+            source.height,
+            matrix,
+            true
+        )
+    }
+
+    private fun runDetection(
+        bitmap: Bitmap
+    ) {
+
+        try {
+
+            val detections =
+                detector.detect(
+                    bitmap
+                )
+
+            val sourceWidth =
+                bitmap.width
+
+            val sourceHeight =
+                bitmap.height
+
+            runOnUiThread {
+
+                overlay.setDetections(
+                    detections,
+                    sourceWidth,
+                    sourceHeight
+                )
+            }
+
+        } catch (_: Exception) {
+
+            /*
+             * Keep camera/video running
+             * if a single inference fails.
+             */
         }
     }
 
     private fun pickVideo() {
 
         val intent =
-            Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            Intent(
+                Intent.ACTION_OPEN_DOCUMENT
+            ).apply {
+
                 type = "video/*"
-                addCategory(Intent.CATEGORY_OPENABLE)
+
+                addCategory(
+                    Intent.CATEGORY_OPENABLE
+                )
             }
 
-        startActivityForResult(intent, 9)
+        startActivityForResult(
+            intent,
+            VIDEO_REQUEST_CODE
+        )
     }
 
-    @Deprecated("Deprecated in Java")
+    @Deprecated(
+        "Deprecated in Java"
+    )
     override fun onActivityResult(
         requestCode: Int,
         resultCode: Int,
@@ -229,16 +446,24 @@ class MainActivity : AppCompatActivity() {
         )
 
         if (
-            requestCode != 9 ||
-            resultCode != RESULT_OK
+            requestCode !=
+            VIDEO_REQUEST_CODE ||
+            resultCode !=
+            RESULT_OK
         ) {
             return
         }
 
-        val videoUri = data?.data ?: return
+        val uri =
+            data?.data ?: return
 
-        preview.visibility = View.GONE
-        videoImage.visibility = View.VISIBLE
+        preview.visibility =
+            View.GONE
+
+        videoImage.visibility =
+            View.VISIBLE
+
+        overlay.clear()
 
         executor.execute {
 
@@ -249,54 +474,143 @@ class MainActivity : AppCompatActivity() {
 
                 retriever.setDataSource(
                     this,
-                    videoUri
+                    uri
                 )
 
                 val duration =
-                    retriever.extractMetadata(
-                        MediaMetadataRetriever.METADATA_KEY_DURATION
-                    )?.toLongOrNull() ?: 0L
+                    retriever
+                        .extractMetadata(
+                            MediaMetadataRetriever
+                                .METADATA_KEY_DURATION
+                        )
+                        ?.toLongOrNull()
+                        ?: 0L
+
+                val videoRotation =
+                    retriever
+                        .extractMetadata(
+                            MediaMetadataRetriever
+                                .METADATA_KEY_VIDEO_ROTATION
+                        )
+                        ?.toIntOrNull()
+                        ?: 0
 
                 var timeMs = 0L
 
-                while (timeMs < duration) {
+                while (
+                    timeMs < duration
+                ) {
 
-                    val bitmap =
-                        retriever.getFrameAtTime(
-                            timeMs * 1000L,
-                            MediaMetadataRetriever.OPTION_CLOSEST
-                        )
+                    val rawBitmap =
+                        retriever
+                            .getFrameAtTime(
+                                timeMs *
+                                    1000L,
 
-                    if (bitmap == null) {
-                        timeMs += 100L
+                                MediaMetadataRetriever
+                                    .OPTION_CLOSEST
+                            )
+
+                    if (
+                        rawBitmap == null
+                    ) {
+
+                        timeMs +=
+                            VIDEO_FRAME_INTERVAL_MS
+
                         continue
                     }
 
+                    val bitmap =
+                        rotateBitmap(
+                            rawBitmap,
+                            videoRotation
+                        )
+
                     runOnUiThread {
-                        videoImage.setImageBitmap(bitmap)
+
+                        videoImage
+                            .setImageBitmap(
+                                bitmap
+                            )
                     }
 
-                    runDetection(bitmap)
+                    runDetection(
+                        bitmap
+                    )
 
-                    timeMs += 100L
+                    /*
+                     * Do not recycle bitmap here because
+                     * ImageView is currently displaying it.
+                     */
+
+                    timeMs +=
+                        VIDEO_FRAME_INTERVAL_MS
                 }
 
             } catch (e: Exception) {
 
                 runOnUiThread {
+
                     monitor.text =
-                        "VIDEO ERROR: ${e.message}"
+                        """
+                        MODE: ${detector.mode}
+                        VIDEO: FAILED
+                        """.trimIndent()
                 }
 
             } finally {
 
-                retriever.release()
+                try {
+                    retriever.release()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+
+        super.onRequestPermissionsResult(
+            requestCode,
+            permissions,
+            grantResults
+        )
+
+        if (
+            requestCode ==
+            CAMERA_PERMISSION_CODE &&
+            grantResults.isNotEmpty() &&
+            grantResults[0] ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+
+            preview.post {
+                startCamera()
             }
         }
     }
 
     override fun onDestroy() {
+
         super.onDestroy()
+
         executor.shutdown()
+    }
+
+    companion object {
+
+        private const val
+            CAMERA_PERMISSION_CODE = 7
+
+        private const val
+            VIDEO_REQUEST_CODE = 9
+
+        private const val
+            VIDEO_FRAME_INTERVAL_MS = 100L
     }
 }
